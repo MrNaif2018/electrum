@@ -27,6 +27,7 @@ from . import networks
 from .transaction import Transaction
 
 class BadResponse(Exception): pass
+class MerkleVerificationFailure(Exception): pass
 
 class SPVDelegate(ABC):
     ''' Abstract base class for an object that is SPV-able, such as a wallet.
@@ -200,35 +201,23 @@ class SPV(ThreadJob):
             self.print_error("verify_merkle:", str(e))
             return
 
-        try:
-            # Verify the hash of the server-provided merkle branch to a
-            # transaction matches the merkle root of its block
-            tx_height = merkle['block_height']
-            pos = merkle['pos']
-            merkle_root = self.hash_merkle_root(merkle['merkle'], tx_hash, pos)
-        except Exception as e:
-            self.print_error(f"exception while verifying tx {tx_hash}: {repr(e)}")
-            self.wallet.verification_failed(tx_hash, self.failure_reasons[4])
-            return
-
+        # Verify the hash of the server-provided merkle branch to a
+        # transaction matches the merkle root of its block
+        tx_height = merkle['block_height']
+        pos = merkle['pos']
+        merkle_branch = merkle['merkle']
         header = self.network.blockchain().read_header(tx_height)
-        # FIXME: if verification fails below,
-        # we should make a fresh connection to a server to
-        # recover from this, as this TX will now never verify
-        if not header:
-            self.print_error(
-                "merkle verification failed for {} (missing header {})"
-                .format(tx_hash, tx_height))
-            self.wallet.verification_failed(tx_hash, self.failure_reasons[1])
-            return
-        if header.get('merkle_root') != merkle_root:
-            self.print_error(
-                "merkle verification failed for {} (merkle root mismatch {} != {})"
-                .format(tx_hash, header.get('merkle_root'), merkle_root))
-            self.wallet.verification_failed(tx_hash, self.failure_reasons[2])
+        try:
+            verify_tx_is_in_block(tx_hash, merkle_branch, pos, header, tx_height)
+        except MerkleVerificationFailure as e:
+            # FIXME: if verification fails below,
+            # we should make a fresh connection to a server to
+            # recover from this, as this TX will now never verify
+            self.print_error(f"exception while verifying tx {tx_hash}: {repr(e)}")
+            self.wallet.verification_failed(tx_hash, e.reason)
             return
         # we passed all the tests
-        self.merkle_roots[tx_hash] = merkle_root
+        self.merkle_roots[tx_hash] = header.get('merkle_root')
         # note: we could pop in the beginning, but then we would request
         # this proof again in case of verification failure from the same server
         self.requested_merkle.discard(tx_hash)
@@ -280,3 +269,17 @@ class SPV(ThreadJob):
 
     def is_up_to_date(self):
         return not self.requested_merkle
+
+
+def verify_tx_is_in_block(tx_hash, merkle_branch, leaf_pos_in_tree, block_header, block_height):
+    """Raise MerkleVerificationFailure if verification fails."""
+    if not block_header:
+        raise MerkleVerificationFailure("merkle verification failed for {} (missing header {})"
+                                 .format(tx_hash, block_height), reason=SPV.failure_reasons[1])
+    try:
+        calc_merkle_root = SPV.hash_merkle_root(merkle_branch, tx_hash, leaf_pos_in_tree)
+    except Exception as e:
+        raise MerkleVerificationFailure(e, reason=SPV.failure_reasons[4])
+    if block_header.get('merkle_root') != calc_merkle_root:
+        raise MerkleVerificationFailure("merkle verification failed for {} (merkle root mismatch {} != {})".format(
+            tx_hash, block_header.get('merkle_root'), calc_merkle_root), reason=SPV.failure_reasons[2])
