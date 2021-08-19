@@ -1,0 +1,34 @@
+version: "3"
+services:
+  bitcoind:
+    image: zquestz/bitcoin-cash-node
+    command: "bitcoind -conf=/conf/bitcoind.conf"
+    volumes:
+      - conf-files:/conf
+    networks:
+      - bitcoin
+    ports:
+      - 18333:18334
+  fulcrum:
+    image: cculianu/fulcrum
+    command: "Fulcrum /conf/fulcrum.conf"
+    networks:
+     - bitcoin
+    ports:
+      - 50001:50001
+      - 50002:50002
+    depends_on:
+    - bitcoind
+    volumes:
+      - conf-files:/conf
+
+networks:
+  bitcoin:
+
+volumes:
+  conf-files:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: electroncash/tests/regtest/configs
